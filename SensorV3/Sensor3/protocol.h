@@ -1,0 +1,15 @@
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#define MESSAGE_SIZE    6
+
+enum {
+	MESSAGE_SIZE_POS,
+	DEV_ID_POS,
+	SENSOR_ID_POS,
+	SENSOR_BYTE_1_POS,
+	SENSOR_BYTE_2_POS,
+	SENSOR_BYTE_3_POS
+};
+
+#endif
