@@ -2,14 +2,13 @@
 
 /*End of auto generated code by Atmel studio */
 
-//#undef F_CPU
-//#define F_CPU 8000000UL
+#define ARDUINO_AVR_ATTINYX4
+#define F_CPU 8000000UL
 
 #include "Arduino.h"
 #include "util/delay.h"
 
-#include "Manchester.h"
-#include "protocol.h"
+#include "oregon.h"
 
 #include "avr/sleep.h"
 #include "avr/wdt.h"
@@ -18,7 +17,7 @@
 //Beginning of Auto generated function prototypes by Atmel Studio
 ISR(WDT_vect );
 void init_wdt();
-void sleep(uint8_t s);
+void sleep(uint16_t s);
 void SenseAndSave();
 void PrintInfo();
 uint16_t ADCRead(uint8_t admux);
@@ -40,22 +39,56 @@ void SendData433();
 #define TEMP_SENSOR_REF A1 // PA1
 #define BATTERY_VOLTAGE A2 // PA2
 
-// #define CALIBRATION true
-
-#ifdef  CALIBRATION
-#define SENSOR_COUNT	  3
-#define	DELAY_EMISSION_ID 0x02
-#else
-#define SENSOR_COUNT	  2
-#endif
-
 #define TEMP_SENSOR_ID    0x00
 #define VOLTAGE_SENSOR_ID 0x01
 #define DEVICE_ID		  0x01
 
+#define COMMAND_REPEAT_COUNT 2
+
+// Unique ID of device
+#define OREGON_ID 0xBB
+
+/*
+0x0A4D	Inside Temperature
+0xEA4C	Outside/Water Temp
+0xCA48	Water Temp
+0x1A2D	Inside Temp-Hygro
+0xFA28	Inside Temp-Hygro
+0x*ACC	Outside Temp-Hygro
+0xCA2C	Outside Temp-Hygro
+0xFAB8	Outside Temp-Hygro
+0x1A3D	Outside Temp-Hygro
+0x5A5D	Inside Temp-Hygro-Baro
+0x5A6D	Inside Temp-Hygro-Baro
+0x2A1D	Rain Gauge
+0x2A19	Rain Gauge
+0x1A99	Anemometer
+0x1A89	Anemometer
+0x3A0D	Anemometer
+0xEA7C	UV sensor
+0xDA78	UV sensor
+0x*AEC	Date & Time
+0xEAC0	Ampere meter
+0x[1,2,3]A** Power meter
+*/
+
+uint8_t OREGON_TYPE[] = {0x1A,0x2D}; // inside temp
+
+Oregon oregon(LED, TX_433, COMMAND_REPEAT_COUNT);
+Oregon::Message message;
+
+
 uint8_t sleep_interval;
 
-uint8_t SENSOR_DATA[SENSOR_COUNT][MESSAGE_SIZE];
+ enum  SENSOR_VALUES
+{
+	 TEMPERATURE,
+	 HUMITIDY,
+	 VOLTAGE,
+	 SENSOR_VALUES_COUNT
+};
+
+float SENSOR_DATA[SENSOR_VALUES_COUNT];
 
 ISR(WATCHDOG_vect)
 {
@@ -77,22 +110,26 @@ void init_wdt()
 	
 	MCUSR &= ~(1 << WDRF);
 	
+#ifdef ARDUINO_AVR_ATTINYX4
 	// Start timed sequence
 	// Set Watchdog Change Enable bit
 	_WD_CONTROL_REG |= (1<<WDCE) | (1<<WDE);
 
-	// Set new prescaler (1 sec), unset reset enable
-	// enable WDT interrupt
+	// Set new prescaler (8 sec), unset reset enable
 	_WD_CONTROL_REG = (1<<WDP3)|(1<<WDP0); // 8 sec
 	//_WD_CONTROL_REG = (1<<WDP1)|(1<<WDP2); // 1 sec
-	_WD_CONTROL_REG |= (1 << WDIE);
 	
+	// enable WDT interrupt
+	_WD_CONTROL_REG |= (1 << WDIE);
+#else
+	#warning "Unknown target: the wadchdog is not configured"
+#endif
 	sei();
 }
 
 // Puts MCU to sleep for specified number of seconds using
 // WDT to wake every second and track number of seconds
-void sleep(uint8_t s)
+void sleep(uint16_t s)
 {
 	s /= 8;
 	if(s == 0 ) s = 1;
@@ -115,91 +152,54 @@ void setup()
 	pinMode(TEMP_SENSOR, INPUT);
 	pinMode(TEMP_SENSOR_REF, INPUT);
 	
-	man.setupTransmit(TX_433, MAN_4800);
-	
-	man.delay1  = 93;
-	man.delay2  = 98;
+	SENSOR_DATA[TEMPERATURE] = 0;
+	SENSOR_DATA[HUMITIDY] = 0;
+	SENSOR_DATA[VOLTAGE] = 0;
+	 
 	
 	digitalWrite(PERIPH_GND, HIGH);
 	
 	init_wdt();
 
-	//Serial.begin(4800);   // set the highest standard baud rate of 115200 bps (mini pro uses x2)
+	//Serial.begin(4800);   // set the highest standard baud rate of 115200 bps
 }
 
+
+float GetVccUsingInternalRef()
+{
+	float vcc = 0;
+	
+	//// internal 1.1V reference against AVcc
+	uint8_t admux = (1 << MUX5) | (1 << MUX0);
+	ADCRead(admux); // first discarded read
+	for(uint8_t i = 0 ; i < 100; ++i)
+	{
+	vcc += ADCRead(admux);
+	}
+	vcc /= 100;
+	// Back-calculate AVcc in mV
+	vcc = (1023 * 1.1) / vcc; //1v1 ref should be adjusted
+
+	return vcc;
+}
 
 void SenseAndSave()
 {
 
-	uint16_t sensorVoltage = 0;
-	uint16_t refVoltage	 = 0;
-	// 1. Read the actual Vcc
-	
-	//// internal 1.1V reference against AVcc
-	uint8_t admux = (1 << MUX5) | (1 << MUX0);
-	_delay_ms(50);
-	//
-	for(uint8_t i = 0 ; i < 100; ++i)
-	ADCRead(admux);
-	float vcc = ADCRead(admux);
-	// Back-calculate AVcc in mV
-	vcc = 1080 / vcc; // 1023 * internal 1v1 ref (1,05571v)
+	float sensorVoltage = 0;
+	float refVoltage    = 0;
+	// 	float vcc  = GetVccUsingInternalRef();
+	const float vcc = 5.0;
 
-	for(uint8_t i = 0 ; i < 100; ++i)
 	analogRead(TEMP_SENSOR);
-	sensorVoltage = analogRead(TEMP_SENSOR);
-	
-	for(uint8_t i = 0 ; i < 100; ++i)
+	sensorVoltage = analogRead(TEMP_SENSOR);	
+
 	analogRead(TEMP_SENSOR_REF);
 	refVoltage = analogRead(TEMP_SENSOR_REF);
 	
-	float temperature_celcius = (sensorVoltage - refVoltage) * (vcc / 1023.0 * 1000);
+	float temperature_celcius = (sensorVoltage - refVoltage) * (vcc / 1023.0 * 100.0);
 	
-	bool isNegative = (temperature_celcius < 0);
-
-	uint16_t temperature_celcius2 = abs(temperature_celcius);
-	uint8_t  integer = temperature_celcius2/10; // ie 26 in this sample
-	uint8_t  fractional = temperature_celcius2 % 10; // ie 4 in this sample
-
-	SENSOR_DATA[TEMP_SENSOR_ID][MESSAGE_SIZE_POS] = MESSAGE_SIZE;
-
-	SENSOR_DATA[TEMP_SENSOR_ID][DEV_ID_POS]    = DEVICE_ID;
-	SENSOR_DATA[TEMP_SENSOR_ID][SENSOR_ID_POS] = TEMP_SENSOR_ID;
-
-	SENSOR_DATA[TEMP_SENSOR_ID][SENSOR_BYTE_1_POS] = integer;
-	SENSOR_DATA[TEMP_SENSOR_ID][SENSOR_BYTE_2_POS] = fractional;
-	SENSOR_DATA[TEMP_SENSOR_ID][SENSOR_BYTE_3_POS] = (isNegative) ? 1 : 0;
-
-	// get a mesurement in centivolts : ex. 154 for 1.54 v.
-	// This format will be suitable for separation of floating point
-	// part of the voltage, below
-	/*
-	uint16_t battery_adc   = 0;
-	analogReference(INTERNAL1V1);
-	_delay_ms(50);
-	for(uint8_t i = 0 ; i < 100; ++i)
-	analogRead(TEMP_SENSOR);
-	battery_adc = analogRead(TEMP_SENSOR);
-	
-	float battery_voltage_mv = battery_adc * (0.0107421875);// 1.1 / 1023 * 10
-	integer = battery_voltage_mv/10; //
-	fractional = temperature_celcius2 % 10;
-	
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][MESSAGE_SIZE_POS] = MESSAGE_SIZE-1;
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][DEV_ID_POS]    = DEVICE_ID;
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][SENSOR_ID_POS] = VOLTAGE_SENSOR_ID;
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][SENSOR_BYTE_1_POS] = integer;
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][SENSOR_BYTE_2_POS] = fractional;
-	//SENSOR_DATA[VOLTAGE_SENSOR_ID][SENSOR_BYTE_3_POS] = 0;
-	*/
-	
-	#ifdef CALIBRATION
-	SENSOR_DATA[DELAY_EMISSION_ID][MESSAGE_SIZE_POS] = MESSAGE_SIZE-1;
-	SENSOR_DATA[DELAY_EMISSION_ID][DEV_ID_POS]    = DEVICE_ID;
-	SENSOR_DATA[DELAY_EMISSION_ID][SENSOR_ID_POS] = DELAY_EMISSION_ID;
-	SENSOR_DATA[DELAY_EMISSION_ID][SENSOR_BYTE_1_POS] = man.delay1;
-	SENSOR_DATA[DELAY_EMISSION_ID][SENSOR_BYTE_2_POS] = man.delay2;
-	#endif
+	message.temperature = temperature_celcius;
 }
 
 void PrintInfo(){}
@@ -209,10 +209,6 @@ uint16_t ADCRead(uint8_t admux)
 {
 	ADMUX = admux;
 	
-	// first discarded read
-	ADCSRA |= (1 << ADSC);
-	while(ADCSRA & (1 << ADSC));
-	
 	ADCSRA |= (1 << ADSC);
 	while(ADCSRA & (1 << ADSC));
 	
@@ -221,28 +217,6 @@ uint16_t ADCRead(uint8_t admux)
 
 void ActivatePeripherals()
 {
-	digitalWrite(LED, HIGH);
-
-	#ifdef CALIBRATION
-
-	if(man.delay1 < 100)
-	{
-		if(man.delay2 < 100)
-		{
-			man.delay2++;
-		}
-		else
-		{
-			man.delay2 = 87;
-			man.delay1++;
-		}
-	}
-	else
-	{
-		man.delay1 = 87;
-	}
-	#endif
-
 	digitalWrite(PERIPH_GND, HIGH);
 	
 	// ADC Enable
@@ -262,17 +236,11 @@ void DeactivatePeripherals()
 	ADCSRA &= ~(1<<ADEN);
 	digitalWrite(PERIPH_GND, LOW);
 	digitalWrite(SENSOR_VCC, LOW);
-	digitalWrite(LED, LOW);
 }
 
 void Sleep()
 {
-	
-	#ifdef CALIBRATION
-	_delay_ms(10);
-	#else
-	sleep(8);
-	#endif
+	sleep(300); // 300s == 5min
 }
 
 /*!
@@ -280,60 +248,18 @@ void Sleep()
 */
 void SendData433()
 {
-
-	// temperature
-	man.transmitArray(
-	SENSOR_DATA[TEMP_SENSOR_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[TEMP_SENSOR_ID]);
-	_delay_ms(30);
-	man.transmitArray(
-	SENSOR_DATA[TEMP_SENSOR_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[TEMP_SENSOR_ID]);
-	_delay_ms(30);
-	man.transmitArray(
-	SENSOR_DATA[TEMP_SENSOR_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[TEMP_SENSOR_ID]);
-	_delay_ms(30);
-	
-	/*
-	// voltage
-	man.transmitArray(
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[VOLTAGE_SENSOR_ID]);
-	_delay_ms(30);
-	man.transmitArray(
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[VOLTAGE_SENSOR_ID]);
-	_delay_ms(30);
-	man.transmitArray(
-	SENSOR_DATA[VOLTAGE_SENSOR_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[VOLTAGE_SENSOR_ID]);
-	_delay_ms(30);
-	*/
-	#ifdef CALIBRATION
-	// delays
-	man.transmitArray(
-	SENSOR_DATA[DELAY_EMISSION_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[DELAY_EMISSION_ID]);
-	_delay_ms(30);
-	man.transmitArray(
-	SENSOR_DATA[DELAY_EMISSION_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[DELAY_EMISSION_ID]);
-	_delay_ms(30);
-	man.transmitArray(
-	SENSOR_DATA[DELAY_EMISSION_ID][MESSAGE_SIZE_POS],
-	SENSOR_DATA[DELAY_EMISSION_ID]);
-	_delay_ms(30);
-	#endif
+	oregon.Emit(OREGON_TYPE, Oregon::Channel::ONE, OREGON_ID, message);
 }
 
 
 void loop()
 {
+	digitalWrite(LED, HIGH);
 	ActivatePeripherals();
 	SenseAndSave();
 	SendData433();
 	DeactivatePeripherals();
+	digitalWrite(LED, LOW);
 	Sleep();
 }
 
@@ -346,4 +272,5 @@ int main(void)
 	{
 		loop();
 	}
+	return 0;
 }
