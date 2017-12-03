@@ -15,6 +15,7 @@ Oregon::Oregon(uint8_t ledPin, uint8_t txPin, uint8_t repeatCount) :  _ledPin(le
 
 void Oregon::Emit(uint8_t type[], uint8_t channel, uint8_t id, const Message &message)
 {
+	 setId(_oregonMessageBuffer, id);
 	
 	 setBatteryLevel(_oregonMessageBuffer, message.battery);
 	 
@@ -228,27 +229,27 @@ void Oregon::setTemperature(uint8_t *data, float temp)
   }
  
   // Determine decimal and float part
-  uint16_t decTen = (uint16_t)(temp * 10);
-  uint8_t dec = decTen / 10;
-  uint8_t flt = decTen % 10;
- data[5] = dec;
- data[4] = flt;
+  //uint16_t decTen = (uint16_t)(temp * 10);
+  //uint8_t dec = decTen / 10;
+  //uint8_t flt = decTen % 10;
+ //data[5] = dec;
+ //data[4] = flt;
   
-  //int tempInt = (int)temp;
-  //int td = (int)(tempInt / 10);
-  //int tf = (int)round((float)((float)tempInt/10 - (float)td) * 10);
- //
-  //int tempFloat =  (int)round((float)(temp - (float)tempInt) * 10);
-  //uint8_t flt_o = tempFloat << 4;
- //
-  //uint8_t dec_o = (td << 4);
-  //dec_o |=  tf;
- //
-  //// Set temperature decimal part
-  //data[5] = dec_o;
- //
-  //// Set temperature float part
-  //data[4] |= flt_o;
+  int tempInt = (int)temp;
+  int td = (int)(tempInt / 10);
+  int tf = (int)round((float)((float)tempInt/10 - (float)td) * 10);
+ 
+  int tempFloat =  (int)round((float)(temp - (float)tempInt) * 10);
+  uint8_t flt_o = tempFloat << 4;
+ 
+  uint8_t dec_o = (td << 4);
+  dec_o |=  tf;
+ 
+  // Set temperature decimal part
+  data[5] = dec_o;
+ 
+  // Set temperature float part
+  data[4] |= flt_o;
 }
  
 /**
