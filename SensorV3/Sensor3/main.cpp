@@ -1,8 +1,11 @@
-﻿/*Begining of Auto generated code by Atmel studio */
+/*Begining of Auto generated code by Atmel studio */
 
 /*End of auto generated code by Atmel studio */
 
+#ifndef ARDUINO_AVR_ATTINYX4
 #define ARDUINO_AVR_ATTINYX4
+#endif
+
 #define F_CPU 8000000UL
 
 
@@ -17,14 +20,23 @@
 
 #include "avr/sleep.h"
 #include "avr/wdt.h"
-#include <avr/eeprom.h>
+
+
+// digital
+#define LED			3  // PA7
+#define TX_433		7  // PA3
+#define SENSOR_VCC	0  // PB0
+#define PERIPH_GND  2  // PB2
+
+#define USE_DS18B20 
+#define USE_LM35
+#define USE_OREGON
 
 //Beginning of Auto generated function prototypes by Atmel Studio
 ISR(WDT_vect );
 void init_wdt();
 void sleep(uint16_t s);
 void SenseAndSave();
-void PrintInfo();
 uint16_t ADCRead(uint8_t admux);
 void ActivatePeripherals();
 void DeactivatePeripherals();
@@ -32,31 +44,26 @@ void Sleep();
 void SendData433();
 //End of Auto generated function prototypes by Atmel Studio
 
-// digital
-#define LED				3  // PA7
-#define TX_433			7  // PA3
-#define SENSOR_VCC		0  // PB0
-#define PERIPH_GND      2  // PB2
-
-//#define USE_DS18B20 
-
 #ifdef USE_DS18B20
-	#define ONE_WIRE_BUS    1  // PB1
+	#define ONE_WIRE_BUS    8  // PA2
 
 	#define TEMPERATURE_PRECISION 12
 	OneWire oneWire(ONE_WIRE_BUS);
 
 	// Pass our oneWire reference to Dallas Temperature.
 	DallasTemperature sensors(&oneWire);
-	// arrays to hold device addresses
-	DeviceAddress insideThermometer;
+	
+	/*
+	* B
+	*/
+	DeviceAddress _thermometerB = {0x28,0xFF,0x72,0x9E,0x31,0x17,0x04,0xC4};
 
-	#define OREGON_ID_DS18B20 0xBC
+	#define OREGON_ID_DS18B20 0xBD
 
 #endif
 
 // Analog
-#define TEMP_SENSOR		A0 // PA0
+#define TEMP_SENSOR	A0 // PA0
 #define TEMP_SENSOR_REF A1 // PA1
 #define BATTERY_VOLTAGE A2 // PA2
 
@@ -92,15 +99,18 @@ void SendData433();
 
 uint8_t OREGON_TYPE[] = {0x1A,0x2D}; // inside temp
 
-Oregon oregon(LED, TX_433, COMMAND_REPEAT_COUNT);
+#ifdef USE_OREGON
+  Oregon oregon(LED, TX_433, COMMAND_REPEAT_COUNT);
+#endif
 
-float lastLm35temp = 0;
-Oregon::Message lm35_message;
+#ifdef USE_LM35
+  float lastLm35temp = 0;
+  Oregon::Message lm35_message;
+#endif
 
 #ifdef USE_DS18B20
-	float lastDs18b20temp = 0;
-	bool lastDs18b20Found = false;
-	Oregon::Message ds18B20_message;
+  float lastDs18b20temp = 0;
+  Oregon::Message ds18B20_message;
 #endif
 
 uint8_t sleep_interval;
@@ -112,8 +122,6 @@ ISR(WATCHDOG_vect)
 	// Re-enable WDT interrupt
 	_WD_CONTROL_REG |= (1<<WDIE);
 }
-
-
 
 // Enable watchdog interrupt, set prescaling to 1 sec
 void init_wdt()
@@ -157,6 +165,9 @@ void sleep(uint16_t s)
 
 void setup()
 {
+	// arduino default init (timers)
+	init();
+	
 	pinMode(LED, OUTPUT);
 	pinMode(PERIPH_GND, OUTPUT);
 	pinMode(TX_433, OUTPUT);
@@ -172,21 +183,8 @@ void setup()
  #ifdef USE_DS18B20
 	// One wire
     sensors.begin();
-	if (!sensors.getAddress(insideThermometer, 0))
-	{
-			digitalWrite(LED, HIGH);
-			_delay_ms(200);
-			digitalWrite(LED, LOW);
-			_delay_ms(200);
-			digitalWrite(LED, HIGH);
-			_delay_ms(200);
-			digitalWrite(LED, LOW);
-	}
-	else
-	{
-		lastDs18b20Found = true;
-		sensors.setResolution(insideThermometer, TEMPERATURE_PRECISION);
-	}
+	sensors.setResolution(_thermometerB, TEMPERATURE_PRECISION);
+
 #endif
 }
 
@@ -213,6 +211,8 @@ float GetVccUsingInternalRef()
 	}
 	for(uint8_t i = sampleCount ; i >0; --i)
 	{
+		ADCSRA |= (1 << ADSC);
+		while(ADCSRA & (1 << ADSC));
 		accumulator += ADC;
 	}
 	vcc = (accumulator >> 4);
@@ -225,7 +225,11 @@ float GetVccUsingInternalRef()
 void SenseAndSave()
 {
 
-	uint16_t accumulator = 0;
+#ifdef USE_LM35
+
+	uint16_t accumulator_sensor = 0;
+	uint16_t accumulator_ref = 0;
+	
 	float sensorVoltage = 0;
 	float refVoltage    = 0;
 	//float vcc  = GetVccUsingInternalRef();
@@ -236,38 +240,28 @@ void SenseAndSave()
 	const uint8_t sampleCount = 16;
 
 	analogRead(TEMP_SENSOR);
-	accumulator = 0;
-	for(uint8_t sampleCounter = sampleCount; sampleCounter > 0; --sampleCounter)
-	{
-		accumulator += analogRead(TEMP_SENSOR);
-	}
-	sensorVoltage = (accumulator >> 4);
-	
 	analogRead(TEMP_SENSOR_REF);
-	accumulator = 0;
+
 	for(uint8_t sampleCounter = sampleCount; sampleCounter > 0; --sampleCounter)
 	{
-	accumulator += analogRead(TEMP_SENSOR_REF);
+		accumulator_sensor += analogRead(TEMP_SENSOR);
+		accumulator_ref += analogRead(TEMP_SENSOR_REF);
 	}
-	refVoltage  = (accumulator >> 4);
 	
+	sensorVoltage = (accumulator_sensor >> 4);
+	refVoltage  = (accumulator_ref >> 4);
+
 	float temperature_celcius = (sensorVoltage - refVoltage) * (vcc / 1023.0 * 100.0);
 	
 	lm35_message.temperature = temperature_celcius;
-	
-#ifdef USE_DS18B20
+#endif
 
-	if(lastDs18b20Found)
-	{	
-		sensors.requestTemperatures();
-		ds18B20_message.temperature = sensors.getTempC(insideThermometer);
-	}
+#ifdef USE_DS18B20
+	sensors.requestTemperatures();
+	ds18B20_message.temperature = sensors.getTempC(_thermometerB);
 #endif
 
 }
-
-void PrintInfo(){}
-
 
 uint16_t ADCRead(uint8_t admux)
 {
@@ -317,23 +311,34 @@ void SendData433()
 	bool ds18b20tempHasChanged = false;
 #endif
 
+#ifdef USE_LM35
 	bool lmTempHasChanged = lm35_message.temperature != lastLm35temp;
+#else
+	bool lmTempHasChanged = false;
+#endif
+
 	bool aTemperatureHasChanged = (lmTempHasChanged || ds18b20tempHasChanged);
 	if(aTemperatureHasChanged)
 	{
+
 		digitalWrite(PERIPH_GND, HIGH);
+		
+#ifdef USE_LM35
 		if(lmTempHasChanged)
 		{
 			lastLm35temp = lm35_message.temperature;
+			#ifdef USE_OREGON
 			oregon.Emit(OREGON_TYPE, Oregon::Channel::ONE, OREGON_ID_LM35, lm35_message);
+			#endif
 		}
-
+#endif
 #ifdef USE_DS18B20
-	
 		if(ds18b20tempHasChanged)
 		{
 			lastDs18b20temp = ds18B20_message.temperature;
+			#ifdef USE_OREGON
 			oregon.Emit(OREGON_TYPE, Oregon::Channel::ONE, OREGON_ID_DS18B20, ds18B20_message);
+			#endif
 		}
 #endif		
 		digitalWrite(PERIPH_GND, LOW);
